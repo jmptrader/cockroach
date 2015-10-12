@@ -142,7 +142,7 @@ func (ts *TestServer) EventFeed() *util.Feed {
 }
 
 // SQLExecutor returns the sql.Executor used by the TestServer.
-func (ts *TestServer) SQLExecutor() sql.Executor {
+func (ts *TestServer) SQLExecutor() *sql.Executor {
 	return ts.Server.sqlServer.Executor
 }
 

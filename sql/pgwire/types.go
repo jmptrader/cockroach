@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"time"
 
 	"github.com/cockroachdb/cockroach/sql/driver"
 	"github.com/lib/pq/oid"
@@ -61,48 +60,43 @@ type pgType struct {
 }
 
 func typeForDatum(d driver.Datum) pgType {
-	switch d.GetValue().(type) {
-	case *int64:
-		return pgType{oid.T_int8, 8, formatBinary}
-
-	case *float64:
-		return pgType{oid.T_float8, 8, formatText}
-
-	case *bool:
+	switch d.Payload.(type) {
+	case *driver.Datum_BoolVal:
 		return pgType{oid.T_bool, 1, formatText}
 
-	case *string:
+	case *driver.Datum_IntVal:
+		return pgType{oid.T_int8, 8, formatBinary}
+
+	case *driver.Datum_FloatVal:
+		return pgType{oid.T_float8, 8, formatText}
+
+	case *driver.Datum_BytesVal, *driver.Datum_StringVal:
 		return pgType{oid.T_text, -1, formatText}
 
-	case *driver.Datum_Timestamp:
+	case *driver.Datum_DateVal:
+		return pgType{oid.T_date, 8, formatText}
+
+	case *driver.Datum_TimeVal:
 		return pgType{oid.T_timestamp, 8, formatText}
 
+	case *driver.Datum_IntervalVal:
+		return pgType{oid.T_interval, 8, formatText}
+
 	default:
-		panic(fmt.Sprintf("unsupported type %T", d.GetValue()))
+		panic(fmt.Sprintf("unsupported type %T", d.Payload))
 	}
 }
 
 func writeDatum(w io.Writer, d driver.Datum) error {
-	v := d.GetValue()
 	// NULL is encoded as -1; all other values have a length prefix.
-	if v == nil {
+	if d.Payload == nil {
 		return binary.Write(w, binary.BigEndian, int32(-1))
 	}
 	var buf bytes.Buffer
-	switch v := d.GetValue().(type) {
-	case *int64:
-		if err := binary.Write(&buf, binary.BigEndian, v); err != nil {
-			return err
-		}
-
-	case *float64:
-		if _, err := buf.WriteString(strconv.FormatFloat(*v, 'f', -1, 64)); err != nil {
-			return err
-		}
-
-	case *bool:
+	switch v := d.Payload.(type) {
+	case *driver.Datum_BoolVal:
 		var b byte
-		if *v {
+		if v.BoolVal {
 			b = 't'
 		} else {
 			b = 'f'
@@ -111,19 +105,37 @@ func writeDatum(w io.Writer, d driver.Datum) error {
 			return err
 		}
 
-	case *string:
-		if _, err := buf.WriteString(*v); err != nil {
+	case *driver.Datum_IntVal:
+		if err := binary.Write(&buf, binary.BigEndian, v); err != nil {
 			return err
 		}
 
-	case *driver.Datum_Timestamp:
-		t, err := d.Value()
-		if err != nil {
+	case *driver.Datum_FloatVal:
+		if _, err := buf.WriteString(strconv.FormatFloat(v.FloatVal, 'f', -1, 64)); err != nil {
 			return err
 		}
-		if _, err := buf.WriteString(t.(time.Time).Format(pgTimestampFormat)); err != nil {
+
+	case *driver.Datum_BytesVal:
+		if _, err := buf.Write(v.BytesVal); err != nil {
 			return err
 		}
+
+	case *driver.Datum_StringVal:
+		if _, err := buf.WriteString(v.StringVal); err != nil {
+			return err
+		}
+
+	case *driver.Datum_DateVal:
+		panic(fmt.Sprintf("TODO(pmattis): unsupported type %T", v))
+
+	case *driver.Datum_TimeVal:
+		t := v.TimeVal.GoTime()
+		if _, err := buf.WriteString(t.Format(pgTimestampFormat)); err != nil {
+			return err
+		}
+
+	case *driver.Datum_IntervalVal:
+		panic(fmt.Sprintf("TODO(pmattis): unsupported type %T", v))
 
 	default:
 		panic(fmt.Sprintf("unsupported type %T", v))

@@ -26,6 +26,6 @@ import (
 // Context holds parameters needed to setup a postgres-compatible server.
 type Context struct {
 	*base.Context
-	Executor sql.Executor
+	Executor *sql.Executor
 	Stopper  *stop.Stopper
 }

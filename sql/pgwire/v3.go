@@ -41,9 +41,11 @@ const (
 	serverMsgParseComplete               = '1'
 	serverMsgReady                       = 'Z'
 	serverMsgRowDescription              = 'T'
+	serverMsgEmptyQuery                  = 'I'
 
 	clientMsgSimpleQuery = 'Q'
 	clientMsgParse       = 'P'
+	clientMsgTerminate   = 'X'
 )
 
 const (
@@ -58,11 +60,11 @@ type parsedQuery struct {
 type v3Conn struct {
 	conn     net.Conn
 	opts     map[string]string
-	executor sql.Executor
+	executor *sql.Executor
 	parsed   map[string]parsedQuery
 }
 
-func newV3Conn(conn net.Conn, data []byte, executor sql.Executor) (*v3Conn, error) {
+func newV3Conn(conn net.Conn, data []byte, executor *sql.Executor) (*v3Conn, error) {
 	v3conn := &v3Conn{
 		conn:     conn,
 		opts:     map[string]string{},
@@ -119,6 +121,9 @@ func (c *v3Conn) serve() error {
 
 		case clientMsgParse:
 			err = c.handleParse(buf)
+
+		case clientMsgTerminate:
+			return nil
 
 		default:
 			log.Fatalf("unrecognized client message type %c", typ)
@@ -186,7 +191,7 @@ func (c *v3Conn) sendCommandComplete(tag string) error {
 	return writeTypedMsg(c.conn, serverMsgCommandComplete, b.Bytes())
 }
 
-func (c *v3Conn) sendError(errToSend error) error {
+func (c *v3Conn) sendError(errToSend string) error {
 	var buf bytes.Buffer
 	if err := buf.WriteByte('S'); err != nil {
 		return err
@@ -207,7 +212,7 @@ func (c *v3Conn) sendError(errToSend error) error {
 	if err := buf.WriteByte('M'); err != nil {
 		return err
 	}
-	if err := writeString(&buf, errToSend.Error()); err != nil {
+	if err := writeString(&buf, errToSend); err != nil {
 		return err
 	}
 	if err := buf.WriteByte(0); err != nil {
@@ -222,61 +227,79 @@ func (c *v3Conn) sendResponse(resp driver.Response) error {
 	}
 	for _, result := range resp.Results {
 		if result.Error != nil {
-			if err := c.sendError(result.Error); err != nil {
+			if err := c.sendError(*result.Error); err != nil {
 				return err
 			}
 			continue
 		}
-		// Send RowDescription.
-		var rowDesc bytes.Buffer
-		if err := binary.Write(&rowDesc, binary.BigEndian, int16(len(result.Columns))); err != nil {
-			return err
-		}
-		for i, column := range result.Columns {
-			if err := writeString(&rowDesc, column); err != nil {
+
+		switch result := result.GetUnion().(type) {
+		case *driver.Response_Result_DDL_:
+			// Send EmptyQueryResponse.
+			return writeTypedMsg(c.conn, serverMsgEmptyQuery, nil)
+
+		case *driver.Response_Result_RowsAffected:
+			// Send CommandComplete.
+			// TODO(bdarnell): tags for other types of commands.
+			tag := fmt.Sprintf("SELECT %d", result.RowsAffected)
+			if err := c.sendCommandComplete(tag); err != nil {
 				return err
 			}
-			// TODO(bdarnell): Use column metadata instead of first row.
-			typ := typeForDatum(result.Rows[0].Values[i])
-			data := []interface{}{
-				int32(0), // Table OID (optional).
-				int16(0), // Column attribute ID (optional).
-				int32(typ.oid),
-				int16(typ.size),
-				int32(0), // Type modifier (none of our supported types have modifiers).
-				int16(typ.preferredFormat),
+
+		case *driver.Response_Result_Rows_:
+			resultRows := result.Rows
+
+			// Send RowDescription.
+			var rowDesc bytes.Buffer
+			if err := binary.Write(&rowDesc, binary.BigEndian, int16(len(resultRows.Columns))); err != nil {
+				return err
 			}
-			for _, x := range data {
-				if err := binary.Write(&rowDesc, binary.BigEndian, x); err != nil {
+			for i, column := range resultRows.Columns {
+				if err := writeString(&rowDesc, column); err != nil {
+					return err
+				}
+				// TODO(bdarnell): Use column metadata instead of first row.
+				typ := typeForDatum(resultRows.Rows[0].Values[i])
+				data := []interface{}{
+					int32(0), // Table OID (optional).
+					int16(0), // Column attribute ID (optional).
+					int32(typ.oid),
+					int16(typ.size),
+					int32(0), // Type modifier (none of our supported types have modifiers).
+					int16(typ.preferredFormat),
+				}
+				for _, x := range data {
+					if err := binary.Write(&rowDesc, binary.BigEndian, x); err != nil {
+						return err
+					}
+				}
+			}
+			if err := writeTypedMsg(c.conn, serverMsgRowDescription, rowDesc.Bytes()); err != nil {
+				return err
+			}
+
+			// Send DataRows.
+			for _, row := range resultRows.Rows {
+				var dataRow bytes.Buffer
+				if err := binary.Write(&dataRow, binary.BigEndian, int16(len(row.Values))); err != nil {
+					return err
+				}
+				for _, col := range row.Values {
+					if err := writeDatum(&dataRow, col); err != nil {
+						return err
+					}
+				}
+				if err := writeTypedMsg(c.conn, serverMsgDataRow, dataRow.Bytes()); err != nil {
 					return err
 				}
 			}
-		}
-		if err := writeTypedMsg(c.conn, serverMsgRowDescription, rowDesc.Bytes()); err != nil {
-			return err
-		}
 
-		// Send DataRows.
-		for _, row := range result.Rows {
-			var dataRow bytes.Buffer
-			if err := binary.Write(&dataRow, binary.BigEndian, int16(len(row.Values))); err != nil {
+			// Send CommandComplete.
+			// TODO(bdarnell): tags for other types of commands.
+			tag := fmt.Sprintf("SELECT %d", len(resultRows.Rows))
+			if err := c.sendCommandComplete(tag); err != nil {
 				return err
 			}
-			for _, col := range row.Values {
-				if err := writeDatum(&dataRow, col); err != nil {
-					return err
-				}
-			}
-			if err := writeTypedMsg(c.conn, serverMsgDataRow, dataRow.Bytes()); err != nil {
-				return err
-			}
-		}
-
-		// Send CommandComplete.
-		// TODO(bdarnell): tags for other types of commands.
-		tag := fmt.Sprintf("SELECT %d", len(result.Rows))
-		if err := c.sendCommandComplete(tag); err != nil {
-			return err
 		}
 	}
 
