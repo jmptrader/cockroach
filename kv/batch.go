@@ -73,6 +73,7 @@ func truncate(br *roachpb.BatchRequest, desc *roachpb.RangeDescriptor, from, to 
 			if !l || !r {
 				return false, nil, util.Errorf("local key mixed with global key in range")
 			}
+			return false, nil, nil
 		}
 		// Below, {end,}keyAddr equals header.{End,}Key, so nothing is local.
 		if keyAddr.Less(from) {

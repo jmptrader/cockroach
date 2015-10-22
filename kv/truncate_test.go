@@ -54,6 +54,14 @@ func TestTruncate(t *testing.T) {
 			expKeys: [][2]string{{loc("b"), loc("e") + "\x00"}},
 			from:    "b", to: "e\x00",
 		},
+		{
+			// Range-local range not contained in active range,
+			// but inside the descriptor.
+			keys:    [][2]string{{loc("b"), loc("e") + "\x00"}},
+			expKeys: [][2]string{{loc("b"), loc("e") + "\x00"}},
+			from:    "c", to: "e",
+			desc: [2]string{"a", "f"},
+		},
 
 		{
 			// Range-local range not contained in active range.
