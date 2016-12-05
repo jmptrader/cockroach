@@ -1,14 +1,14 @@
 - Feature Name: segmented_storage
 - Status: rejected
 - Start Date: 2015-07-29
-- RFC PR:
-- Cockroach Issue: #1644
+- RFC PR: [#1866](https://github.com/cockroachdb/cockroach/pull/1866)
+- Cockroach Issue: [#1644](https://github.com/cockroachdb/cockroach/issues/1644)
 
 # Rejection notes
 
 This proposal was deemed too complex and expensive for the problem it
 solves. Instead, we will drop snapshots whose application would create
-a conflict in the `rangesByKey` map. This avoids the race conditions
+a conflict in the `replicasByKey` map. This avoids the race conditions
 in issue #1644, but leaves the range in an uninitialized and unusable
 state. In the common case, this state will resolve quickly, and in the
 uncommon case when it persists, we simply rely on the usual repair and
@@ -80,8 +80,8 @@ is:
            +------------+
            | roachpb.Key  |
 
-Segment ID | Raw key    | Walltime | Logical TS |
-4 bytes    | (variable) | 8 bytes  | 4 bytes    |
+Segment ID | Raw key    | Wall time | Logical TS |
+4 bytes    | (variable) | 8 bytes   | 4 bytes    |
 ```
 
 All keys not associated with a replica (including the counter used to
@@ -95,7 +95,7 @@ same store, or a raft leader sends a snapshot to a store that should
 have a replica of the same range but doesn't.
 
 Each replica-creation path will need to consider whether the replica
-has already been created via the other path (comparaing replica IDs,
+has already been created via the other path (comparing replica IDs,
 not just range IDs). In `splitTrigger`, if the replica already exists
 under a different segment, then a snapshot occurred before the split.
 The left-hand range should delete all data that are outside the bounds
